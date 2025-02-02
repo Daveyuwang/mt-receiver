@@ -20,6 +20,39 @@
 #define BUFFER_SIZE 1024        // Size of the buffer for receiving data
 #define NUM_CLIENT_THREADS 4    // Number of client threads to create
 
+// structure to pass socket information to the thread
+typedef struct {
+    int sockfd;
+    int thread_id;
+} ThreadArgs;
+
+/**
+ * Send thread function:
+ * - Sends a sequence of messages to the server.
+ * - Each message is sent with a delay of 1 second between them.
+ * - If the send operation fails, it breaks the loop and exits.
+ */
+void *client_send_thread(void *arg){
+    ThreadArgs *args = (ThreadArgs *)arg;
+    int sockfd = args->sockfd;
+    int thread_id = args->thread_id;
+    char message[BUFFER_SIZE];
+    int counter = 0;
+
+    while(1){
+        snprintf(message, BUFFER_SIZE, "Client %d message #%d", thread_id, counter++);
+        if(send(sockfd, message, strlen(message), 0) < 0){
+            printf("[CLIENT] thread %d: Failed to send data\n", thread_id);
+            break;
+        }
+        printf("[CLIENT] thread %d: Sent message #%d\n", thread_id, counter);
+        sleep(1);
+    }
+    free(arg);
+    pthread_exit(NULL);
+    return NULL;
+}
+
 /**
  * Client thread function:
  * - Each thread creates a TCP socket.
@@ -27,54 +60,69 @@
  * - Once connected, the thread continuously calls recv() to receive data
  *   from the server and prints the received data.
  */
-void *client_receive_thread(void *arg){
+void *client_thread(void *arg){
+    int thread_id = *(int *)arg;    // get the thread id
+    free(arg);                      // free the argument
+
     int sockfd;
     struct sockaddr_in serv_addr;
     char buffer[BUFFER_SIZE];
     ssize_t n;
 
-    // Create a socket
+    // Create socket
     if((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0){
-        perror("Failed to create socket");
-        pthread_exit(NULL);
+        printf("[CLIENT] thread %d: Failed to create socket\n", thread_id);
+        return NULL;
     }
 
-    // Configure the server address
+    // Configure server address
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(SERVER_PORT);
     if(inet_pton(AF_INET, SERVER_IP, &serv_addr.sin_addr) <= 0){
-        perror("Invalid address or address not supported");
+        printf("[CLIENT] thread %d: Invalid address\n", thread_id);
         close(sockfd);
-        pthread_exit(NULL);
+        return NULL;
     }
 
-    // Connect to the server
+    // Connect to server
     if(connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0){
-        perror("Connection failed");
+        printf("[CLIENT] thread %d: Failed to connect to server\n", thread_id);
         close(sockfd);
-        pthread_exit(NULL);
+        return NULL;
     }
 
-    printf("[CLIENT] thread %ld connected to server %s:%d\n", pthread_self(), SERVER_IP, SERVER_PORT);
+    printf("[CLIENT] thread %d: Connected to server\n", thread_id);
 
+    // Create send thread
+    pthread_t send_thread;
+    ThreadArgs *args = (ThreadArgs *)malloc(sizeof(ThreadArgs));
+    args->sockfd = sockfd;
+    args->thread_id = thread_id;
 
-    // Receive data from the server in a loop
-    while((n = recv(sockfd, buffer, BUFFER_SIZE - 1, 0)) > 0){
-        buffer[n] = '\0';
-        printf("[CLIENT] thread %ld received: %s\n", pthread_self(), buffer);
+    if(pthread_create(&send_thread, NULL, client_send_thread, args) != 0){
+        printf("[CLIENT] thread %d: Failed to create send thread\n", thread_id);
+        free(args);
+        close(sockfd);
+        return NULL;
     }
-    if(n < 0){
-        perror("Failed to receive data");
-    }else{
-        printf("[CLIENT] thread %ld: Connection closed by server\n", pthread_self());
-    }
+    pthread_detach(send_thread);
 
-    // Cleanup
+    // Receive data from the server
+    while(1){
+        while((n = recv(sockfd, buffer, BUFFER_SIZE-1, 0)) > 0){
+            buffer[n] = '\0';
+            printf("[CLIENT] thread %d: Received %zd bytes: %s\n", thread_id, n, buffer);
+        }
+        if(n < 0){
+            printf("[CLIENT] thread %d: Failed to receive data\n", thread_id);
+        }else{
+            printf("[CLIENT] thread %d: Connection closed by server\n", thread_id);
+        }
+    }
     close(sockfd);
-    pthread_exit(NULL);
+    return NULL;
 }
-
 /**
  * Main function:
  * - Creates NUM_CLIENT_THREADS threads.
@@ -84,13 +132,15 @@ void *client_receive_thread(void *arg){
 int main(int argc, char *argv[]){
     pthread_t threads[NUM_CLIENT_THREADS];
 
-    // Create multiple threads to simulate concurrent receiving
+    // Create client threads
     for(int i = 0; i < NUM_CLIENT_THREADS; i++){
-        if(pthread_create(&threads[i], NULL, client_receive_thread, NULL) != 0){
-            perror("Failed to create thread");
-            exit(EXIT_FAILURE);
+        int *thread_id = (int *)malloc(sizeof(int));
+        *thread_id = i;
+        if(pthread_create(&threads[i], NULL, client_thread, thread_id) != 0){
+            printf("Failed to create thread %d\n", i);
+            free(thread_id);
+            continue;
         }
-        // optionally detach the thread so that resources are freed automatically
         pthread_detach(threads[i]);
     }
 
@@ -98,6 +148,5 @@ int main(int argc, char *argv[]){
     while(1){
         sleep(1);
     }
-
     return 0;
 }
